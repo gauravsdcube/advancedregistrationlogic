@@ -58,6 +58,108 @@ class RegistrationForm extends Registration
         $this->trigger(static::EVENT_AFTER_SET_FORM);
     }
 
+    public function registerWithAllowedFields(
+        ?\yii\authclient\ClientInterface $authClient,
+        array $allowedProfileFields,
+        array $allowedUserFields,
+        array $allowedPasswordFields,
+    ): bool {
+        $isValid = true;
+
+        if (!empty($allowedUserFields) && !$this->models['User']->validate($allowedUserFields)) {
+            $isValid = false;
+        }
+
+        if ($this->enablePasswordFormFlag && !empty($allowedPasswordFields)) {
+            if (!$this->models['Password']->validate($allowedPasswordFields)) {
+                $isValid = false;
+            }
+        }
+
+        if (!$this->models['GroupUser']->validate(['group_id'])) {
+            $isValid = false;
+        }
+
+        if (!empty($allowedProfileFields) && !$this->models['Profile']->validate($allowedProfileFields)) {
+            $isValid = false;
+        }
+
+        if (!$isValid) {
+            return false;
+        }
+
+        $this->models['User']->language = Yii::$app->i18n->getAllowedLanguage();
+        if ($this->enableUserApproval) {
+            $this->models['User']->status = \humhub\modules\user\models\User::STATUS_NEED_APPROVAL;
+            $this->models['User']->registrationGroupId = $this->models['GroupUser']->group_id;
+        }
+
+        if ($this->models['GroupUser']->group_id !== null) {
+            $this->models['User']->allowAssignDefaultGroup(false);
+        }
+
+        if ($this->models['User']->save(false)) {
+            $this->models['Profile']->user_id = $this->models['User']->id;
+            $this->models['Profile']->save(false);
+
+            $this->models['User']->populateRelation('profile', $this->models['Profile']);
+
+            if ($this->models['GroupUser']->validate()) {
+                $this->models['GroupUser']->user_id = $this->models['User']->id;
+                $this->models['GroupUser']->save(false);
+            }
+
+            if ($this->enablePasswordFormFlag) {
+                $this->models['Password']->user_id = $this->models['User']->id;
+                $this->models['Password']->setPassword($this->models['Password']->newPassword);
+                if ($this->models['Password']->save(false)
+                    && $this->enableMustChangePassword) {
+                    $this->models['User']->setMustChangePassword($this->models['Password']->mustChangePassword);
+                }
+            }
+
+            if ($authClient !== null) {
+                (new AuthClientUserService($this->models['User']))->add($authClient);
+                $authClient->trigger(
+                    \humhub\modules\user\authclient\BaseClient::EVENT_CREATE_USER,
+                    new \yii\web\UserEvent(['identity' => $this->models['User']]),
+                );
+            }
+
+            $this->trigger(self::EVENT_AFTER_REGISTRATION, new \yii\web\UserEvent(['identity' => $this->models['User']]));
+
+            return true;
+        }
+
+        return false;
+    }
+
+    public function excludeProfileFields(array $excludeFieldNames): void
+    {
+        if (empty($excludeFieldNames)) {
+            return;
+        }
+
+        if (!isset($this->definition['elements']['Profile']['elements'])) {
+            return;
+        }
+
+        foreach ($this->definition['elements']['Profile']['elements'] as $categoryKey => &$category) {
+            if (!isset($category['elements']) || !is_array($category['elements'])) {
+                continue;
+            }
+
+            foreach ($excludeFieldNames as $fieldName) {
+                unset($category['elements'][$fieldName]);
+            }
+
+            if (empty($category['elements'])) {
+                unset($this->definition['elements']['Profile']['elements'][$categoryKey]);
+            }
+        }
+        unset($category);
+    }
+
     public static function getMaxStep(): int
     {
         return self::STEP_MAX;
@@ -156,6 +258,11 @@ class RegistrationForm extends Registration
             return $this->getProfileFormDefinitionByCategoryIds($categoryIds, false);
         }
 
+        $allGroupCategoryIds = $this->getAllGroupCategoryIds();
+        if (!empty($allGroupCategoryIds)) {
+            return $this->getProfileFormDefinitionByCategoryIds($allGroupCategoryIds, true);
+        }
+
         if (empty($categoryIds)) {
             return $this->getProfileFormDefinitionByCategoryIds(null, false);
         }
@@ -183,6 +290,31 @@ class RegistrationForm extends Registration
         }
 
         return [$category->id];
+    }
+
+    private function getAllGroupCategoryIds(): array
+    {
+        $map = $this->getGroupCategoryMap();
+        $categoryTitles = array_values($map);
+
+        $groups = Group::getRegistrationGroups();
+        foreach ($groups as $group) {
+            $categoryTitles[] = $map[$group->name] ?? $group->name;
+        }
+
+        $categoryIds = [];
+        foreach ($categoryTitles as $categoryTitle) {
+            $categoryTitle = trim((string) $categoryTitle);
+            if ($categoryTitle === '') {
+                continue;
+            }
+            $category = ProfileFieldCategory::findOne(['title' => $categoryTitle]);
+            if ($category) {
+                $categoryIds[] = $category->id;
+            }
+        }
+
+        return array_values(array_unique($categoryIds));
     }
 
     private function getProfileFormDefinitionByCategoryIds(?array $categoryIds, bool $exclude): array

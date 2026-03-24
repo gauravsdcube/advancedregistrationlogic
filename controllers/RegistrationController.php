@@ -122,6 +122,7 @@ class RegistrationController extends Controller
                 $state['completed'][RegistrationForm::STEP_GROUP] = false;
                 $state['completed'][RegistrationForm::STEP_PROFILE] = false;
                 $state['data']['Profile'] = [];
+                $state['step2ProfileFields'] = [];
             }
             $state['data']['GroupUser']['group_id'] = $postedGroupId;
             $this->saveRegistrationState($state);
@@ -135,6 +136,7 @@ class RegistrationController extends Controller
                 $state['completed'][RegistrationForm::STEP_GROUP] = false;
                 $state['completed'][RegistrationForm::STEP_PROFILE] = false;
                 $state['data']['Profile'] = [];
+                $state['step2ProfileFields'] = [];
             }
             $state['data']['GroupUser']['group_id'] = $queryGroupId;
             $this->saveRegistrationState($state);
@@ -162,6 +164,9 @@ class RegistrationController extends Controller
         if ($step === RegistrationForm::STEP_GROUP && $groupId !== null) {
             $registration->getGroupUser()->group_id = $groupId;
         }
+        if ($step === RegistrationForm::STEP_PROFILE && !empty($state['step2ProfileFields'])) {
+            $registration->excludeProfileFields($state['step2ProfileFields']);
+        }
 
         if ($step === RegistrationForm::STEP_GROUP && Yii::$app->request->post('step_refresh')) {
             $postedGroupId = Yii::$app->request->post('GroupUser')['group_id'] ?? null;
@@ -178,6 +183,7 @@ class RegistrationController extends Controller
                 $state['completed'][RegistrationForm::STEP_GROUP] = false;
                 $state['completed'][RegistrationForm::STEP_PROFILE] = false;
                 $state['data']['Profile'] = [];
+                $state['step2ProfileFields'] = [];
             }
             $this->storeStepData($registration, $state, $step);
             $this->saveRegistrationState($state);
@@ -224,7 +230,18 @@ class RegistrationController extends Controller
                 }
 
                 $this->hydrateRegistrationFromState($registration, $state);
-                if ($registration->register($authClient)) {
+                $allowedProfileFields = array_values(array_unique(array_merge(
+                    $state['step2ProfileFields'] ?? [],
+                    $state['step3ProfileFields'] ?? [],
+                )));
+                $allowedUserFields = $state['step1UserFields'] ?? [];
+                $allowedPasswordFields = $state['step1PasswordFields'] ?? [];
+                if ($registration->registerWithAllowedFields(
+                    $authClient,
+                    $allowedProfileFields,
+                    $allowedUserFields,
+                    $allowedPasswordFields,
+                )) {
                     Yii::$app->session->remove(self::REGISTRATION_SESSION_KEY);
                     Yii::$app->session->remove(self::REGISTRATION_TOKEN_KEY);
                     Yii::$app->session->remove('authClient');
@@ -383,6 +400,7 @@ class RegistrationController extends Controller
                         $registration->getFieldNamesForModel('User'),
                     ),
                 );
+                $state['step1UserFields'] = $registration->getFieldNamesForModel('User');
                 if ($registration->getPassword() !== null) {
                     $state['data']['Password'] = array_merge(
                         $state['data']['Password'] ?? [],
@@ -391,6 +409,7 @@ class RegistrationController extends Controller
                             $registration->getFieldNamesForModel('Password'),
                         ),
                     );
+                    $state['step1PasswordFields'] = $registration->getFieldNamesForModel('Password');
                 }
                 break;
             case RegistrationForm::STEP_GROUP:
@@ -408,6 +427,7 @@ class RegistrationController extends Controller
                         $registration->getFieldNamesForModel('Profile'),
                     ),
                 );
+                $state['step2ProfileFields'] = $registration->getFieldNamesForModel('Profile');
                 break;
             case RegistrationForm::STEP_PROFILE:
                 $state['data']['Profile'] = array_merge(
@@ -417,6 +437,7 @@ class RegistrationController extends Controller
                         $registration->getFieldNamesForModel('Profile'),
                     ),
                 );
+                $state['step3ProfileFields'] = $registration->getFieldNamesForModel('Profile');
                 break;
         }
     }
